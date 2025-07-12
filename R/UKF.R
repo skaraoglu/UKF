@@ -5,11 +5,14 @@
 
 #=====================================================#
 #' UKF_dT
-#' Unscented Kalman Filter (UKF) for time step dT
+#' Unscented Kalman Filter (UKF) for time step dT (Streamlined Version)
 #' Doesn't use data at this step;
 #' UKF_blend fn later blends UKF with data after dT step.
 #' This function was known previously as
 #' multiple_param_unscented_kalman_filter.
+#' This function is a streamlined version of standard UKF.
+#' It is designed to be more efficient and easier to use.
+#' This is the default UKF method used in the package.
 #' @param t_dummy a dummy time variable, because ode models don't have explcit time
 #' @param ode_model model with variables y and N_p parameters
 #' @param xhat UFK posterior prediction of augmented states (param + ind vars)
@@ -81,6 +84,204 @@ UKF_dT <- function(t_dummy, ode_model, xhat, Pxx, y, N_p, N_y, R, dt, dT,
   return(list(xhat = xhat, Pxx = Pxx, K = K))
 } # ENDFN UKF
 
+#=====================================================#
+#' UKF_dT_std
+#' Unscented Kalman Filter (UKF) for time step dT (Standard Version)
+#' Doesn't use data at this step;
+#' UKF_blend fn later blends UKF with data after dT step.
+#' To use this function, you must specify the method as "standard" in UKF_blend.
+#' @param t_dummy a dummy time variable, because ode models don't have explcit time
+#' @param ode_model model with variables y and N_p parameters
+#' @param xhat UFK posterior prediction of augmented states (param + ind vars)
+#' @param Pxx augmented covariance matrix for sigma points
+#' @param y independent variable state vector
+#' @param N_p number of unknown model params
+#' @param N_y number of ind variables
+#' @param R covariance matrix of y state. initialized in UKF_blend and updated with sigma points as Pyy in current function.
+#' @param dt smaller time step size within dT
+#' @param dT time step size that comes from time series data step
+#' @param R_scale related to standard deviation of Gaussian measurement noise of ind variables. A number that must be specified by user.
+#' @param Q_scale related to standard deviation of process noise. Noise related to model parameters
+#' @param forcePositive logical, if TRUE, ensures all parameters stay positive
+#' @return list: xhat (augmented Kalman update), Pxx (augmented covariance at sigma points), and K (Kalman gain matrix)
+#' @examples
+#' Example
+#' @export
+
+# UKF_dT_std: Detailed step-by-step UKF implementation with explicit comparison to the standard UKF formula.
+UKF_dT_std <- function(t_dummy, ode_model, xhat, Pxx, y, N_p, N_y, R, dt, dT,
+                       R_scale, Q_scale, forcePositive = FALSE, trace = FALSE, seeded = TRUE) {
+  # --- Step 1: Sigma Point Generation ---
+  # UKF Formula:
+  #   \chi_{t|t}^0 = x_{t|t}
+  #   \chi_{t|t}^i = x_{t|t} + [\sqrt{(L+\lambda)P_{t|t}}]_i
+  #   \chi_{t|t}^{i+L} = x_{t|t} - [\sqrt{(L+\lambda)P_{t|t}}]_i
+  N_x <- N_p + N_y
+  alpha <- 1e-3      # Controls spread of sigma points (standard: small for high-dim)
+  kappa <- 0         # Secondary scaling parameter (often 0 or 3-N_x)
+  beta <- 2          # For Gaussian priors, beta=2 is optimal
+  lambda <- alpha^2 * (N_x + kappa) - N_x
+  N_sigma <- 2 * N_x + 1  # Standard UKF: 2L+1 sigma points
+
+  # Robust Cholesky: ensure (N_x + lambda) * Pxx is positive definite
+  # This matches the UKF formula for sigma point spread, but adds jitter for numerical stability.
+  jitter <- 0
+  max_jitter <- 1e-2
+  success <- FALSE
+  S <- NULL
+  first_step <- TRUE
+  while (!success && jitter <= max_jitter) {
+    S <- tryCatch(chol((N_x + lambda) * (Pxx + diag(jitter, N_x))),
+                  error = function(e) NULL)
+    if (!is.null(S)) {
+      success <- TRUE
+    } else {
+      if (first_step) {
+        jitter <- 1e-8
+        first_step <- FALSE
+      } else {
+        jitter <- jitter * 10
+      }
+    }
+  }
+
+  # If Cholesky fails, force positive definiteness (not in original UKF, but essential for real data)
+  if (!success) {
+    if (!requireNamespace("Matrix", quietly = TRUE)) {
+      stop("Cholesky decomposition failed in UKF_dT_std even after adding jitter, and package 'Matrix' is not installed for nearPD.")
+    }
+    Pxx_pd <- as.matrix(Matrix::nearPD((N_x + lambda) * Pxx)$mat)
+    S <- tryCatch(chol(Pxx_pd), error = function(e) NULL)
+    if (is.null(S)) {
+      stop("Cholesky decomposition failed in UKF_dT_std even after nearPD.")
+    }
+  }
+
+  # Generate sigma points: central mean, then symmetric points
+  Xa <- matrix(0, nrow = N_x, ncol = N_sigma)
+  Xa[, 1] <- xhat
+  for (i in 1:N_x) {
+    Xa[, i + 1] <- xhat + S[, i]
+    Xa[, i + 1 + N_x] <- xhat - S[, i]
+  }
+  # --- End Sigma Point Generation ---
+
+  # --- Step 2: Prediction (Propagate Sigma Points) ---
+  # UKF Formula:
+  #   \chi_{t+1|t}^i = f(\chi_{t|t}^i)
+  # Each sigma point is propagated through the nonlinear process model.
+  X <- matrix(0, nrow = N_x, ncol = N_sigma)
+  for (i in 1:N_sigma) {
+    X[, i] <- propagate_model(t_dummy, ode_model, dt, dT, N_p, matrix(Xa[, i], ncol = 1))
+  }
+  # --- End Prediction ---
+
+  # --- Step 3: Predicted Mean and Covariance ---
+  # UKF Formula:
+  #   \hat{x}_{t+1|t} = \sum_{i=0}^{2L} W_m^i \chi_{t+1|t}^i
+  #   P_{t+1|t} = \sum_{i=0}^{2L} W_c^i (\chi_{t+1|t}^i - \hat{x}_{t+1|t})(...)^T + Q
+  Wm <- c(lambda / (N_x + lambda), rep(1 / (2 * (N_x + lambda)), 2 * N_x)) # mean weights
+  Wc <- Wm
+  Wc[1] <- Wc[1] + (1 - alpha^2 + beta) # covariance weights
+  xtilde <- as.vector(X %*% Wm) # weighted mean of propagated sigma points
+
+  # Predicted covariance of the state
+  Pxx_pred <- matrix(0, nrow = N_x, ncol = N_x)
+  for (i in 1:N_sigma) {
+    dx <- X[, i] - xtilde
+    Pxx_pred <- Pxx_pred + Wc[i] * (dx %*% t(dx))
+  }
+  # Add process noise Q (standard UKF: Q added to all states, here only to parameter block)
+  Q <- matrix(0, nrow = N_x, ncol = N_x)
+  Q[1:N_p, 1:N_p] <- Q_scale * diag(N_p)
+  Pxx_pred <- Pxx_pred + Q
+  # --- End Predicted Mean and Covariance ---
+
+  # --- Step 4: Observation Prediction ---
+  # UKF Formula:
+  #   \gamma_{t+1|t}^i = h(\chi_{t+1|t}^i)
+  #   \hat{y}_{t+1|t} = \sum_{i=0}^{2L} W_m^i \gamma_{t+1|t}^i
+  # Here, h(x) is linear: select observed variables from state vector.
+  # For nonlinear h(x), replace Y <- ... with Y <- h(X)
+  Y <- X[(N_p + 1):(N_p + N_y), , drop = FALSE]
+  ytilde <- as.vector(Y %*% Wm) # predicted observation mean
+  # --- End Observation Prediction ---
+
+  # --- Step 5: Predicted Observation Covariance ---
+  # UKF Formula:
+  #   P_{yy} = \sum_{i=0}^{2L} W_c^i (\gamma_{t+1|t}^i - \hat{y}_{t+1|t})(...)^T + R
+  Pyy <- matrix(0, nrow = N_y, ncol = N_y)
+  for (i in 1:N_sigma) {
+    dy <- Y[, i] - ytilde
+    Pyy <- Pyy + Wc[i] * (dy %*% t(dy))
+  }
+  Pyy <- Pyy + R # add observation noise
+
+  # Add jitter for numerical stability (not in original UKF, but essential for real data)
+  # Add jitter to Pyy for numerical stability
+  jitter_Pyy <- 0
+  max_jitter_Pyy <- 1e-2
+  success_Pyy <- FALSE
+  first_step_Pyy <- TRUE
+  while (!success_Pyy && jitter_Pyy <= max_jitter_Pyy) {
+    # Try to make Pyy positive definite by adding jitter
+    eigvals <- eigen(Pyy + diag(jitter_Pyy, N_y), symmetric = TRUE, only.values = TRUE)$values
+    if (all(eigvals > 0)) {
+      Pyy <- Pyy + diag(jitter_Pyy, N_y)
+      success_Pyy <- TRUE
+    } else {
+      if (first_step_Pyy) {
+        jitter_Pyy <- 1e-8
+        first_step_Pyy <- FALSE
+      } else {
+        jitter_Pyy <- jitter_Pyy * 10
+      }
+    }
+  }
+  # If still not positive definite, force using nearPD
+  if (!success_Pyy) {
+    Pyy <- as.matrix(Matrix::nearPD(Pyy)$mat)
+  }
+  # --- End Predicted Observation Covariance ---
+
+  # --- Step 6: Cross-Covariance ---
+  # UKF Formula:
+  #   P_{xy} = \sum_{i=0}^{2L} W_c^i (\chi_{t+1|t}^i - \hat{x}_{t+1|t})(\gamma_{t+1|t}^i - \hat{y}_{t+1|t})^T
+  Pxy <- matrix(0, nrow = N_x, ncol = N_y)
+  for (i in 1:N_sigma) {
+    dx <- X[, i] - xtilde
+    dy <- Y[, i] - ytilde
+    Pxy <- Pxy + Wc[i] * (dx %*% t(dy))
+  }
+  # --- End Cross-Covariance ---
+
+  # --- Step 7: Kalman Gain ---
+  # UKF Formula:
+  #   K = P_{xy} P_{yy}^{-1}
+  K <- Pxy %*% solve(Pyy)
+  # --- End Kalman Gain ---
+
+  # --- Step 8: State Update ---
+  # UKF Formula:
+  #   x_{t+1|t+1} = \hat{x}_{t+1|t} + K (y_{t+1} - \hat{y}_{t+1|t})
+  xhat_new <- xtilde + K %*% (y - ytilde)
+  # Enforce positivity for parameters (not in original UKF, but needed for physical plausibility)
+  if (forcePositive) {
+    param_min <- 1e-8
+    xhat_new[1:N_p] <- pmax(param_min, xhat_new[1:N_p])
+  }
+  # --- End State Update ---
+
+  # --- Step 9: Covariance Update ---
+  # UKF Formula:
+  #   P_{t+1|t+1} = P_{t+1|t} - K P_{yy} K^T
+  Pxx_new <- Pxx_pred - K %*% Pyy %*% t(K)
+  # --- End Covariance Update ---
+
+  # --- Return updated state, covariance, and Kalman gain ---
+  return(list(xhat = xhat_new, Pxx = Pxx_new, K = K))
+}
+
 #' propagate_model
 #' Used inside UKF_dT, previously named kura_ode_model
 #' Take the ode model and current augmented state
@@ -142,13 +343,15 @@ propagate_model <- function(t, ode_model, dt, dT, N_p, x) {
 #' @param Q_scale related to standard deviation of process noise. Noise related to model parameters. User choice. Can it be 0?
 #' @param forcePositive logical, if TRUE, ensures all parameters stay positive
 #' @param seeded logical, if TRUE, sets seed for reproducibility
+#' @param method string to specify time step dT method, "standard" or "streamlined"
 #' @return list: param_est (N_p model parameter estiamtes after run through time series), xhat (augmented Kalman update), error (error from Pxx augmented covariance at sigma points), and chisq (chi-square goodness of fit of prediction to data)
 #' @examples
 #' Example
 #' @export
 UKF_blend <- function(t_dummy, ts_data, ode_model, N_p, N_y,
                       param_guess, dt, dT, R_scale = 0.3, Q_scale = 0.015,
-                      forcePositive = FALSE, seeded = FALSE) {
+                      forcePositive = FALSE, seeded = FALSE,
+                      method = "streamlined") {
   time_points <- ts_data[, 1]
   num_time <- length(time_points)
   N_x <- N_p + N_y
@@ -209,9 +412,17 @@ UKF_blend <- function(t_dummy, ts_data, ode_model, N_p, N_y,
     # due to input matrix being non positive definite.
     UKF_kstep <- tryCatch(
       {
-        UKF_dT(t_dummy, ode_model, xhat[, k - 1], Pxx[[k - 1]], y[, k],
-                N_p, N_y, R, dt, dT,
-                R_scale, Q_scale, forcePositive = forcePositive)
+        if (method == "standard") {
+          UKF_dT_std(t_dummy, ode_model, xhat[, k - 1], Pxx[[k - 1]], y[, k],
+                     N_p, N_y, R, dt, dT,
+                     R_scale, Q_scale, forcePositive)
+        } else if (method == "streamlined") {
+          UKF_dT(t_dummy, ode_model, xhat[, k - 1], Pxx[[k - 1]], y[, k],
+                 N_p, N_y, R, dt, dT,
+                 R_scale, Q_scale, forcePositive)
+        } else {
+          stop("Invalid method specified. Use 'standard' or 'streamlined'.")
+        }
       },
       error=function(cond) {
         message("By chance, matrix caused Cholesky to fail.")
@@ -350,6 +561,7 @@ optim_params <- function(param_guess, method = "L-BFGS-B",
 #' @param trace logical, if TRUE, returns the best step and chi-square value
 #' @param forcePositive logical, if TRUE, ensures all parameters stay positive
 #' @param seeded logical, if TRUE, sets seed for reproducibility
+#' @param method string to specify time step dT method, "standard" or "streamlined"
 #' @return list: par (vector of N_p optimized parameters) and value (final chi-square goodness of fit to time series)
 #' @examples
 #' Example
@@ -357,7 +569,8 @@ optim_params <- function(param_guess, method = "L-BFGS-B",
 iterative_param_optim <- function(param_guess, t_dummy, ts_data, ode_model,
                                   N_p, N_y, dt, dT, param_tol = 0.01, MAXSTEPS = 30,
                                   R_scale = 1, Q_scale = 1, trace = FALSE,
-                                  forcePositive = FALSE, seeded = FALSE) {
+                                  forcePositive = FALSE, seeded = FALSE,
+                                  method = "streamlined") {
   done <- FALSE
   steps <- 0
   chisq_history <- numeric()  # Store chi-square values for each iteration
@@ -372,7 +585,7 @@ iterative_param_optim <- function(param_guess, t_dummy, ts_data, ode_model,
     ukf_run <- UKF_blend(t_dummy, ts_data, ode_model,
                          N_p, N_y, param_guess, dt, dT,
                          R_scale, Q_scale, forcePositive = forcePositive,
-                         seeded = seeded)
+                         seeded = seeded, method = method)
 
     param_new <- ukf_run$param_est
     chisq_history <- c(chisq_history, ukf_run$chisq)  # Append chi-square

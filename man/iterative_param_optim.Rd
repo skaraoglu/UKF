@@ -25,7 +25,9 @@ iterative_param_optim(
   R_scale = 0.3,
   Q_scale = 0.015,
   trace = FALSE,
-  forcePositive = FALSE
+  forcePositive = FALSE,
+  seeded = FALSE,
+  method = "streamlined"
 )
 }
 \arguments{
@@ -56,6 +58,10 @@ iterative_param_optim(
 \item{trace}{logical, if TRUE, prints out the current parameter vector and chi-square goodness of fit at each iteration}
 
 \item{forcePositive}{logical, if TRUE, ensures all parameters stay positive}
+
+\item{seeded}{logical, if TRUE, sets seed for reproducibility. Default is FALSE.}
+
+\item{method}{string to specify time step dT method, "standard" or "streamlined"}
 }
 \value{
 list: par (vector of N_p optimized parameters) and value (final chi-square goodness of fit to time series)

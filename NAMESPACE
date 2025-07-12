@@ -2,6 +2,7 @@
 
 export(UKF_blend)
 export(UKF_dT)
+export(UKF_dT_std)
 export(iterative_param_optim)
 export(optim_params)
 export(plot_ukf_and_smoothed)

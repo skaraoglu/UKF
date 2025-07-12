@@ -70,6 +70,41 @@ The UKF operates in two main phases at each time step: prediction and update. He
 
 ---
 
+## UKF Methods: Streamlined vs. Standard
+
+This package provides two UKF one-step methods for parameter and state estimation:
+
+- **Streamlined UKF (`UKF_dT`)**:  
+  - Uses $2N_x$ sigma points (no central mean point or scaling parameter).
+  - All sigma points are equally weighted in mean and covariance calculations.
+  - Covariance update uses $P_{xx} = P_{xx} - K P_{xy}^T$ (empirically robust for this application).
+  - Process noise $Q$ is only added to the parameter block of the covariance matrix.
+  - Designed for computational efficiency and robust optimization in moderate state dimensions.
+
+- **Standard UKF (`UKF_dT_std`)**:  
+  - Implements the original UKF formulation with $2L+1$ sigma points and scaling parameter $\lambda$.
+  - Uses UKF weights ($W_m^i$, $W_c^i$) for mean and covariance.
+  - Covariance update follows $P_{xx} = P_{xx} - K P_{yy} K^T$.
+  - Robust positive-definite covariance handling using the `Matrix` package.
+  - Suitable for users who want strict adherence to the original UKF algorithm.
+
+Both methods propagate sigma points using a Runge-Kutta 4th order (RK4) integrator for nonlinear ODE models.  
+The observation model is assumed linear (direct selection of state variables).
+
+**Select the method via the `method` parameter in `UKF_blend` and `iterative_param_optim` (`"streamlined"` or `"standard"`).**
+
+---
+
+## Additional Parameters
+
+- `param_tol`: Tolerance for parameter convergence (default: `1e-4`)
+- `MAXSTEPS`: Maximum number of UKF iterations (default: `30`)
+- `forcePositive`: If `TRUE`, enforces positivity for parameters
+- `seeded`: If `TRUE`, sets random seed for reproducibility
+- `method`: `"streamlined"` or `"standard"` UKF step
+
+---
+
 ## Installation
 
 ```r
@@ -102,12 +137,15 @@ N_y <- ncol(data) - 1
 dt <- 0.1
 dT <- 1.0
 
-# Run UKF parameter estimation
+# Run UKF parameter estimation (choose method: "streamlined" or "standard")
 result <- iterative_param_optim(
   param_guess, t_dummy = 0, ts_data = data, ode_model = my_ode_model,
   N_p = N_p, N_y = N_y, dt = dt, dT = dT,
   param_tol = 1e-4, MAXSTEPS = 100,
-  R_scale = 0.3, Q_scale = 0.01, trace = TRUE, forcePositive = TRUE
+  R_scale = 0.3, Q_scale = 0.01,
+  trace = TRUE, forcePositive = TRUE,
+  seeded = TRUE,
+  method = "standard" # or "streamlined"
 )
 
 # Access estimated parameters and diagnostics
@@ -140,7 +178,7 @@ The package includes plotting functions for:
 
 Some functions require:
 ```r
-install.packages(c('KernSmooth', 'ggplot2', 'pracma'))
+install.packages(c('KernSmooth', 'ggplot2', 'pracma', 'Matrix'))
 ```
 
 ---

@@ -32,7 +32,8 @@ UKF_blend(
   R_scale = 0.3,
   Q_scale = 0.015,
   seeded = FALSE,
-  forcePositive = FALSE
+  forcePositive = FALSE,
+  method = "streamlined"
 )
 }
 \arguments{
@@ -59,6 +60,8 @@ UKF_blend(
 \item{seeded}{logical, if TRUE, sets seed for reproducibility. Default is FALSE.}
 
 \item{forcePositive}{logical, if TRUE, ensures all parameters stay positive}
+
+\item{method}{string, method to use for UKF. Default is "streamlined". Use "standard" for UKF_dT_std function.}
 }
 \value{
 list: param_est (N_p model parameter estiamtes after run through time series), xhat (augmented Kalman update), error (error from Pxx augmented covariance at sigma points), and chisq (chi-square goodness of fit of prediction to data)
